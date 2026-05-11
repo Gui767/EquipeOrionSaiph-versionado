@@ -1,4 +1,4 @@
-//teste mudando a lógica do fitro de verde 
+//teste mudando a lógica do fitro de verde (Funcional) 
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -256,9 +256,10 @@ void executarDesvioVerde(int lado) {
    while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
     // Gira de 1000 pulsos para o lado detectado originalmente
     if (lado == 1) { // Esquerda
-      mEsq.move(-1000, velBusca); mDir.move(1000, velBusca);
+      mEsq.move(-1100, velBusca); mDir.move(1100, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
       //até achar a linha
-      mEsq.move(-1000, velBusca); mDir.move(1000, velBusca);
+      mEsq.move(1500, velBusca); mDir.move(-1500, velBusca);
       while (mEsq.isMoving() || mDir.isMoving()) {
       mEsq.update(); mDir.update();
       atualizarSensores();
@@ -271,9 +272,10 @@ void executarDesvioVerde(int lado) {
       }
     }
     } else { // Direita
-      mEsq.move(1000, velBusca); mDir.move(-1000, velBusca);
+      mEsq.move(1100, velBusca); mDir.move(-1100, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
       //até achar a linha
-      mEsq.move(1000, velBusca); mDir.move(-1000, velBusca);
+      mEsq.move(-1500, velBusca); mDir.move(1500, velBusca);
       while (mEsq.isMoving() || mDir.isMoving()) {
       mEsq.update(); mDir.update();
       atualizarSensores();
@@ -286,7 +288,7 @@ void executarDesvioVerde(int lado) {
       }
     }
     }
-    while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+
 
 
   }
