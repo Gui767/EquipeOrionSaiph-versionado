@@ -1,35 +1,83 @@
-//teste mudando a lógica do fitro de verde (Funcional) 
-
+#include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_TCS34725.h>
 #include "MotorControl.h"
+#include "IReight_model.hpp" 
 
-// --- Configurações de Hardware (Segue Linha) ---
-MotorControl mEsq(42, 41, 13, 14);
-MotorControl mDir(16, 17, 47, 21);
-const int sensorPins[6] = {8, 3, 9, 10, 7, 4};
-int sensorValues[6];
-const int limiar = 4090;
-const int N_LINHA = 3;
-int t = 3;
+// --- Definições RGB e Periféricos ---
+#define PIN_LED_1 2
+#define NUMPIXELS 8
+
+Adafruit_NeoPixel led1(NUMPIXELS, PIN_LED_1, NEO_GRB + NEO_KHZ800);
+
+// --- Configurações de Hardware (Motores e Sensores IR) ---
+MotorControl mEsq(5, 4, 40, 39);
+MotorControl mDir(7, 6, 42, 41);
+int sensorValues[8];
+const int limiar = 800;
+const int limiarD = 2000; // Limiar de Desvio
+
+const int N_LINHA = 1;
+int t = 1;
+int t2 = 3;
 int nv = 2;
+int TErro = 0;
+int TErro1 = 0;
+int TErro2 = 0;
+
+int Va = 150;
+
+int lP = 250; // Limiar de preto para 'c'
+int nT = 1;   // Número de tentativas
+int d1 = 10;
+int d2 = 5;
+int d3 = 15;
+int tentativas = 1;
+
+// --- VERIFICAÇÃO CONSECUTIVA DE OBSTÁCULO ---
+const int nL = 30; // Número de verificações seguidas exigidas
+int nL2 = 5;
+int leiturasObstaculo = 0;
+
+int av = 0;
+int av1 = 150;
+int av2 = 600;
+
+// --- VARIÁVEL DE PULSO DE GIRO ---
+int PG = 1000;
 
 // --- Configurações de Cor (Núcleo 0) ---
-#define I2C_SDA 2
-#define I2C_SCL 1
+#define I2C_SDA 15
+#define I2C_SCL 16
 #define TCAADDR 0x70
+
+const uint8_t esq = 0;
+const uint8_t dir = 1;
+
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
-
-// Variáveis de controle
-volatile int n1 = 0; 
+volatile int n1 = 0;
 volatile int n2 = 0;
-volatile int comandoVerde = 0; // 0=Nada, 1=Verde Esq (S0), 2=Verde Dir (S1)
+volatile int comandoVerde = 0;
+int reta = 0;
+int nR = 10;
+int e = 0;
+int nE = 50;
 
-char ladoPrioridade = 'E'; 
-const int velMedia = 130;
-const int velBusca = 110;
-const int velLenta = 80;  // Velocidade para o avanço após verde
+char ladoPrioridade = 'E';
+bool achou = true;
+bool vermelho = false;
+const int velMedia = 180;
+const int velBusca = 220;
+const int velLenta = 100;
+
+// ================================================================
+// CONFIGURAÇÕES DOS SENSORES ULTRASSÔNICOS
+// ================================================================
+const int TRIG_1 = 12;
+const int ECHO_1 = 11;
+const int TRIG_2 = 21;
+const int ECHO_2 = 47;
 
 // --- Interrupções dos Motores ---
 void IRAM_ATTR isrEsq() { mEsq.handleInterrupt(); }
@@ -43,284 +91,831 @@ void tcaSelect(uint8_t channel) {
   Wire.endTransmission();
 }
 
-bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
-  if (c < 50) return false;
-  float Lcor = (r + g + b) * 0.40; // Limite de cor com 40% da claridade "c"
-  return (g > Lcor && r < Lcor);  //só retorna 1 se verde(g) for maior que 40% de 'c', e vermelho(r) for menor que 40% de 'c'
+void rgbEsq(uint8_t m, uint8_t n, uint8_t p){
+  for(int i = 4; i < NUMPIXELS; i++) {
+    led1.setPixelColor(i, led1.Color(m, n, p));
+  }
+  led1.show();
 }
 
+void rgbDir(uint8_t m, uint8_t n, uint8_t p){
+  for(int i = 0; i < 4; i++) {
+    led1.setPixelColor(i, led1.Color(m, n, p));
+  }
+  led1.show();
+}
+
+bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
+  if (c < 80) return false;
+  float Lcor = (r + g + b);
+  return (g > Lcor * 0.37 && r < Lcor * 0.34 && b < Lcor * 0.26);
+}
+
+bool ehVrmlh(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
+  if (c < 80) return false;
+  float Lcor = (r + g + b);
+  return (g < Lcor * 0.40 && r > Lcor * 0.48);
+}
 
 // ================================================================
-// TAREFA DO NÚCLEO 0: LEITURA DE VERDE
+// LEITURA FÍSICA DO ULTRASSÔNICO
 // ================================================================
+float lerDistancia(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  long duracao = pulseIn(echoPin, HIGH, 30000); 
+  if (duracao == 0) {
+    return -1.0;
+  }
+  
+  return (duracao * 0.0333) / 2;
+}
+
+// ================================================================
+// CONTROLE DOS MOTORES (PONTE H)
+// ================================================================
+void controleM(int velEsq, int velDir) {
+  if (velEsq >= 0) { 
+    ledcWrite(40, velEsq);
+    ledcWrite(39, 0);      
+  } else { 
+    ledcWrite(40, 0); 
+    ledcWrite(39, abs(velEsq));
+  }
+  
+  if (velDir >= 0) { 
+    ledcWrite(42, velDir); 
+    ledcWrite(41, 0);
+  } else { 
+    ledcWrite(42, 0);      
+    ledcWrite(41, abs(velDir));
+  }
+}
+
+// Protótipos de funções
+void atualizarSensores();
+int calcularPesoEsquerda();
+int calcularPesoDireita();
+void desvio();
+void verificarPrata();
+
+// ================================================================
+// NOFA FUNÇÃO: PARADA E PISCAR AZUL
+// ================================================================
+void verificarPrata() {
+  bool todosMenores = true;
+  for (int i = 0; i < 8; i++) {
+    if (sensorValues[i] >= 220) {
+      todosMenores = false;
+      break;
+    }
+  }
+
+  if (todosMenores) {
+    controleM(0, 0);
+    mEsq.stop();
+    mDir.stop();
+    Serial.println("Todos os sensores < 220! Parando e piscando em azul...");
+    while (1) {
+      rgbEsq(0, 0, 255);
+      rgbDir(0, 0, 255);
+      delay(250);
+      rgbEsq(0, 0, 0);
+      rgbDir(0, 0, 0);
+      delay(250);
+    }
+  }
+}
+
+// ================================================================
+// ALINHAMENTO NA LINHA
+// ================================================================
+void alinhamento() {
+  while(1){
+    atualizarSensores();
+    verificarPrata();
+    int todosAtivos = 0;
+    for (int i = 0; i < 8; i++) {
+      if (sensorValues[i] >= limiarD) {
+        todosAtivos++;
+      }
+    }
+
+    if (todosAtivos >= 6) {
+      controleM(0, 0);
+      break;
+    }
+  
+    int pesoEsq = calcularPesoEsquerda();
+    int pesoDir = calcularPesoDireita();
+    if (pesoEsq == pesoDir ) {
+      controleM(-100, -100);
+    } 
+    else if (pesoDir > pesoEsq) {
+      controleM(-180, 180);
+    } 
+    else {
+      controleM(180, -180);
+    }
+  }
+}
+
+void alinhamentoF() {
+  mEsq.move(80, velBusca);
+  mDir.move(80, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+  while(1){
+    atualizarSensores();
+    verificarPrata();
+    int todosAtivos = 0;
+    for (int i = 0; i < 8; i++) {
+      if (sensorValues[i] >= limiarD) { 
+        todosAtivos++;
+      }
+    }
+
+    if (todosAtivos >= 6) {
+      controleM(0, 0);
+      break;
+    }
+  
+    int pesoEsq = calcularPesoEsquerda();
+    int pesoDir = calcularPesoDireita();
+    if (pesoEsq == pesoDir ) {
+      controleM(110, 110);
+    } 
+    else if (pesoDir > pesoEsq) {
+      controleM(180, -180);
+    }
+    else {
+      controleM(-180, 180);
+    }
+  }
+}
+
+// ================================================================
+// DESVIO DE OBSTÁCULO
+// ================================================================
+void desvioObstaculo() {
+  rgbEsq(255,0,0);
+  rgbDir(255,0,0);
+  mEsq.stop();
+  mDir.stop();
+  controleM(0, 0);
+  delay(200);
+  rgbEsq(0,0,0);
+  rgbDir(0,0,0);
+  Serial.println("Obstaculo detectado! Girando para a esquerda...");
+  
+  mEsq.move(-PG, velBusca);
+  mDir.move(PG, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+  
+  mEsq.move(-150, velBusca); mDir.move(-150, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+  
+  alinhamento();
+  desvio();
+  alinhamentoF();
+
+  mEsq.move(150, velBusca); mDir.move(150, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { 
+    mEsq.update(); 
+    mDir.update(); 
+  }
+
+  alinhamento();
+
+  mEsq.move(350, velBusca); mDir.move(350, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { 
+    mEsq.update(); 
+    mDir.update(); 
+  }
+
+  mEsq.move(-PG, velBusca); mDir.move(PG, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { 
+    mEsq.update();
+    mDir.update(); 
+  }
+
+  mEsq.move(-PG, velBusca); mDir.move(PG, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) {
+    mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+    int ativos = 0;
+    for (int i = 3; i < 5; i++) if (sensorValues[i] >= limiarD) ativos++;
+    if (ativos >= N_LINHA){delay(t2); atualizarSensores(); verificarPrata();
+      if (ativos >= N_LINHA) break;
+    }
+  }
+  mEsq.move(-100, velBusca); mDir.move(-100, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) { 
+    mEsq.update(); 
+    mDir.update(); 
+  }
+  mEsq.move(-500, velBusca); mDir.move(-500, velBusca);
+  while (mEsq.isMoving() || mDir.isMoving()) {
+    mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+    int ativos = 0;
+    for (int i = 0; i < 8; i++) if (sensorValues[i] >= limiarD) ativos++;
+    if (ativos >= N_LINHA){delay(t); atualizarSensores(); verificarPrata();
+      if (ativos >= N_LINHA) break;
+    }
+  }
+  mEsq.stop(); mDir.stop(); delay(10);
+  n1 = 0; n2 = 0; comandoVerde = 0;
+}
+
+void desvio() {
+  av = av1;
+  for(int i = 0; i < 2; i++){
+    int leituras = 0;
+    controleM(velMedia, velMedia);
+    while (leituras < nL2) {
+      float dist = lerDistancia(TRIG_2, ECHO_2);
+      if (dist > 0 && dist <= d3) {
+        leituras++;
+      } else {
+        leituras = 0;
+      }
+      delay(15);
+    }
+    
+    leituras = 0;
+    controleM(velMedia, velMedia);
+    while (leituras < nL2) {
+      float dist = lerDistancia(TRIG_2, ECHO_2);
+      if (dist > d3 || dist < 0) {
+        leituras++;
+      } else {
+        leituras = 0;
+      }
+      delay(15);
+    }
+    
+    mEsq.move(av, velMedia);
+    mDir.move(av, velMedia);
+    while (mEsq.isMoving() || mDir.isMoving()) {
+      mEsq.update();
+      mDir.update();
+    }
+    
+    mEsq.move(PG, velBusca);
+    mDir.move(-PG, velBusca);
+    while (mEsq.isMoving() || mDir.isMoving()) { 
+      mEsq.update(); 
+      mDir.update(); 
+    }
+    av = av2;
+  }
+  ladoPrioridade = 'E';
+}
+
+// ================================================================
+// TAREFA DO NÚCLEO 0: LEITURA DE VERDE E VERMELHO (FREE-RTOS)
+// ================================================================
+void encruzilhada(){
+  mEsq.move(Va, velLenta);
+  mDir.move(Va, velLenta);
+  while (mEsq.isMoving() || mDir.isMoving()) {
+    mEsq.update(); mDir.update();
+    if (comandoVerde != 0) { break; }
+    atualizarSensores();
+    verificarPrata();
+    int ativos = 0;
+    for (int i = 3; i < 6; i++) if (sensorValues[i] >= limiarD) ativos++;
+    if (ativos > 0) { break; }
+  }
+}
+
 void TaskContadorVerde(void * pvParameters) {
   Wire.begin(I2C_SDA, I2C_SCL);
-  tcaSelect(0); tcs.begin();
-  tcaSelect(1); tcs.begin();
+  delay(t);
+  tcaSelect(esq); delay(t); tcs.begin();
+  tcaSelect(dir); delay(t); tcs.begin();
   
   static int consecutivosS1 = 0;
   static int consecutivosS2 = 0;
-
+  
   for(;;) {
-    if (comandoVerde != 0) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
-
     uint16_t r, g, b, c;
 
-    // Sensor 0 (Canal 0) - Esquerda
-    tcaSelect(0);
+    // --- CHECAGEM SENSOR ESQUERDO ---
+    tcaSelect(esq);
     delay(t);
     tcs.getRawData(&r, &g, &b, &c);
-    if (ehVerde(r, g, b, c)) {
-      consecutivosS1++;
-      if (consecutivosS1 >= nv) {
-        n1++; comandoVerde = 1; consecutivosS1 = 0;
-        Serial.printf("\n[S0] VERDE! C=%d | Total n1: %d\n", c, n1);
-      }
-    } else { consecutivosS1 = 0; }
-    Serial.print("S1 -> R:"); Serial.print(r); Serial.print(" G:"); Serial.print(g); 
-    Serial.print(" B:"); Serial.print(b); Serial.print(" C:"); Serial.print(c);
-    // Sensor 1 (Canal 1) - Direita
-    tcaSelect(1);
-    delay(t);
-    tcs.getRawData(&r, &g, &b, &c);
-    Serial.print(" | S2 -> R:"); Serial.print(r); Serial.print(" G:"); Serial.print(g);
-    Serial.print(" B:"); Serial.print(b); Serial.print(" C:"); Serial.print(c);
-    Serial.print("    n1="); Serial.print(n1); Serial.print("    n2="); Serial.println(n2);
-    if (ehVerde(r, g, b, c)) {
-      consecutivosS2++;
-      if (consecutivosS2 >= nv) {
-        n2++; comandoVerde = 2; consecutivosS2 = 0;
-        Serial.printf("\n[S1] VERDE! C=%d | Total n2: %d\n", c, n2);
-      }
-    } else { consecutivosS2 = 0; }
-    vTaskDelay(pdMS_TO_TICKS(5)); 
-  }
 
+    // Detecção de Vermelho (Esquerda) -> Parada Absoluta
+    if (ehVrmlh(r, g, b, c)) {
+      controleM(0, 0);
+      mEsq.stop();
+      mDir.stop();
+      vermelho = true;
+      rgbEsq(255, 0, 0);
+      rgbDir(255, 0, 0);
+      Serial.println("Vermelho detectado no sensor esquerdo! Parando robo...");
+      while (1) {
+        vTaskDelay(pdMS_TO_TICKS(100)); // Evita reset por Watchdog Timer
+      }
+    }
+
+    // Detecção de Verde (Esquerda)
+    if (comandoVerde == 0) {
+      if (ehVerde(r, g, b, c)) {
+        consecutivosS1++;
+        if (consecutivosS1 >= nv) {
+          n1++; comandoVerde = 1; consecutivosS1 = 0;
+        }
+      } else { 
+        consecutivosS1 = 0; 
+      }
+    }
+
+    // --- CHECAGEM SENSOR DIREITO ---
+    tcaSelect(dir);
+    delay(t);
+    tcs.getRawData(&r, &g, &b, &c);
+
+    // Detecção de Vermelho (Direita) -> Parada Absoluta
+    if (ehVrmlh(r, g, b, c)) {
+      controleM(0, 0);
+      mEsq.stop();
+      mDir.stop();
+      vermelho = true;
+      rgbEsq(255, 0, 0);
+      rgbDir(255, 0, 0);
+      Serial.println("Vermelho detectado no sensor direito! Parando robo...");
+      while (1) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
+    }
+
+    // Detecção de Verde (Direita)
+    if (comandoVerde == 0) {
+      if (ehVerde(r, g, b, c)) {
+        consecutivosS2++;
+        if (consecutivosS2 >= nv) {
+          n2++; comandoVerde = 2; consecutivosS2 = 0;
+        }
+      } else { 
+        consecutivosS2 = 0; 
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
 
 // ================================================================
-// FUNÇÕES DE MOVIMENTAÇÃO E SENSORES ORIGINAIS
+// SENSORES IR E NAVEGAÇÃO
 // ================================================================
 void atualizarSensores() {
-  for (int i = 0; i < 6; i++) sensorValues[i] = analogRead(sensorPins[i]);
+  recv_data();
+  if(g_new_package_flag == 1) {
+    g_new_package_flag = 0; 
+    Deal_Usart_AData();
+    for (int i = 0; i < 8; i++) {
+      sensorValues[i] = IR_Data_Anglo[i];
+    }
+  }
 }
 
 int calcularPesoEsquerda() {
   int soma = 0;
-  for (int i = 0; i < 3; i++) if (sensorValues[i] >= limiar) soma += (3 - i);
+  for (int i = 0; i < 4; i++) if (sensorValues[i] >= limiar) soma += (4 - i);
   return soma;
 }
 
 int calcularPesoDireita() {
   int soma = 0;
-  for (int i = 3; i < 6; i++) if (sensorValues[i] >= limiar) soma += (i - 2);
+  for (int i = 4; i < 8; i++) if (sensorValues[i] >= limiar) soma += (i - 3); 
   return soma;
-}
-
-void acionarMotores(int pEsq, int pDir) {
-  if (pEsq >= 0) { ledcWrite(13, pEsq); ledcWrite(14, 0); }
-  else { ledcWrite(13, 0); ledcWrite(14, abs(pEsq)); }
-  
-  if (pDir >= 0) { ledcWrite(47, pDir); ledcWrite(21, 0); }
-  else { ledcWrite(47, 0); ledcWrite(21, abs(pDir)); }
 }
 
 void executarSegueLinha() {
   int ativosEsq = 0, ativosDir = 0;
-  for (int i = 0; i < 3; i++) if (sensorValues[i] >= limiar) ativosEsq++;
-  for (int i = 3; i < 6; i++) if (sensorValues[i] >= limiar) ativosDir++;
-  
-  if (ativosEsq >= 3 && ativosEsq > ativosDir) ladoPrioridade = 'E';
-  else if (ativosDir >= 3 && ativosDir > ativosEsq) ladoPrioridade = 'D';
+  for (int i = 0; i < 4; i++) if (sensorValues[i] >= limiar) ativosEsq += (4 - i);
+  for (int i = 4; i < 8; i++) if (sensorValues[i] >= limiar) ativosDir += (i - 3);
+  if(ativosEsq >= 6 || ativosDir >= 6){
+    for (int i = 0; i < 2; i++) if (sensorValues[i] >= limiar) ladoPrioridade = 'E';
+    for (int i = 6; i < 8; i++) if (sensorValues[i] >= limiar) ladoPrioridade = 'D'; 
+    e = 0;
+  } else {
+    e++;
+    if(e >= nE){
+      ladoPrioridade = 'F';
+    }
+  }
 
   int pesoEsq = calcularPesoEsquerda();
   int pesoDir = calcularPesoDireita();
-  
-  if (pesoEsq == pesoDir) {
-    acionarMotores(velMedia, velMedia);
+  if (pesoEsq == pesoDir || (sensorValues[4] >= limiar && sensorValues[5] >= limiar)) { 
+    if(ativosEsq >= 10 && ativosDir >= 10){
+      encruzilhada();
+    }
+    int maxLeituraSensor = 4095;
+    int velMinimaCorrecao = velMedia - 30;
+    int velMaximaCorrecao = velMedia + 50;
+    int velAlinhamentoDir = map(sensorValues[4], 600, maxLeituraSensor, velMinimaCorrecao, velMaximaCorrecao);
+    int velAlinhamentoEsq = map(sensorValues[5], 600, maxLeituraSensor, velMinimaCorrecao, velMaximaCorrecao);
+    velAlinhamentoDir = constrain(velAlinhamentoDir, velMinimaCorrecao, velMaximaCorrecao);
+    velAlinhamentoEsq = constrain(velAlinhamentoEsq, velMinimaCorrecao, velMaximaCorrecao);
+
+    controleM(velAlinhamentoEsq, velAlinhamentoDir);
   } else if (pesoEsq > pesoDir) {
     int diff = pesoEsq - pesoDir;
-    if (diff < 3)      acionarMotores(70, 130);
-    else if (diff < 5) acionarMotores(-110, 130);
-    else               acionarMotores(-130, 180);
+    if (diff < 3)      controleM(-80, 190);
+    else if (diff < 5) controleM(-130, 130);
+    else               controleM(0, 180);
   } else {
     int diff = pesoDir - pesoEsq;
-    if (diff < 3)      acionarMotores(130, 70);
-    else if (diff < 5) acionarMotores(130, -110);
-    else               acionarMotores(180, -130);
+    if (diff < 3)      controleM(190, -80);
+    else if (diff < 5) controleM(130, -130);
+    else               controleM(180, 0);
   }
 }
 
 bool tentarGirarEBuscar(char direcao, long pulsos) {
   if (direcao == 'E') { mEsq.move(-pulsos, velBusca); mDir.move(pulsos, velBusca); }
   else { mEsq.move(pulsos, velBusca); mDir.move(-pulsos, velBusca); }
-
-  while (mEsq.isMoving() || mDir.isMoving()) {
-    mEsq.update(); mDir.update();
-    atualizarSensores();
-    int ativos = 0;
-    for (int i = 0; i < 6; i++) if (sensorValues[i] >= limiar) ativos++;
-    if (ativos >= N_LINHA) { mEsq.stop(); mDir.stop(); return true; }
+ 
+  bool achou = false;
+  if(direcao == 'E'){
+    while (mEsq.isMoving() || mDir.isMoving()) {
+      mEsq.update(); mDir.update();
+      atualizarSensores();
+      verificarPrata();
+      int ativos = 0;
+      for (int i = 0; i < 4; i++) if (sensorValues[i] >= limiarD) ativos++;
+      if (ativos >= N_LINHA) { achou = true; break;}
+    }
+  } else {
+    while (mEsq.isMoving() || mDir.isMoving()) {
+      mEsq.update(); mDir.update();
+      atualizarSensores();
+      verificarPrata();
+      int ativos = 0;
+      for (int i = 4; i < 8; i++) if (sensorValues[i] >= limiarD) ativos++;
+      if (ativos >= N_LINHA) { achou = true; break;}
+    }
+  }
+  if(achou == true){
+    if (direcao == 'E') { mEsq.move(-pulsos, velBusca); mDir.move(pulsos, velBusca); }
+    else { mEsq.move(pulsos, velBusca); mDir.move(-pulsos, velBusca); }
+    while (mEsq.isMoving() || mDir.isMoving()) {
+      mEsq.update(); mDir.update();
+      atualizarSensores();
+      verificarPrata();
+      int ativos = 0;
+      for (int i = 3; i < 5; i++) if (sensorValues[i] >= limiarD) ativos++;
+      if (ativos >= N_LINHA) { mEsq.stop(); mDir.stop(); return true; }
+    }
   }
   return false;
 }
 
 void encontrarLinha() {
-  if (ladoPrioridade == 'E') {
-    if (tentarGirarEBuscar('E', 1000)) return;
-    delay(200); if (tentarGirarEBuscar('D', 1000)) return;
-    delay(200); if (tentarGirarEBuscar('D', 1000)) return;
-    delay(200); if (tentarGirarEBuscar('E', 1000)) return;
+  if (ladoPrioridade == 'F'){
+    mEsq.move(80, 130); mDir.move(80, 130);
+    while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+
+    mEsq.move(650, velBusca); mDir.move(650, velBusca);
+    while (1) {
+      if(!mEsq.isMoving() || !mDir.isMoving()){ achou = false; break; }
+      mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+      int ativos = 0;
+      for (int i = 1; i < 7; i++) if (sensorValues[i] >= limiarD) ativos++;
+      if (ativos >= N_LINHA){ delay(t); atualizarSensores(); verificarPrata();
+        int ativos = 0;
+        for (int i = 1; i < 7; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA){ achou = true; break; }
+      }
+    }
+    if(achou == false){
+      mEsq.move(-1000, velLenta); mDir.move(-1000, velLenta);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+        int ativos = 0;
+        for (int i = 0; i < 8; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA){ delay(t); atualizarSensores(); verificarPrata();
+          int ativos = 0;
+          for (int i = 0; i < 8; i++) if (sensorValues[i] >= limiarD) ativos++;
+          if (ativos >= N_LINHA){ break; }
+        }
+      }
+      mEsq.move(-150, 130); mDir.move(-150, 130);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+    }
+    ladoPrioridade = 'E';
+  }
+  else if (ladoPrioridade == 'E') {
+    if (tentarGirarEBuscar('E', PG)) return;
+    delay(200);
+    if (tentarGirarEBuscar('D', PG)) return;
+    delay(200); if (tentarGirarEBuscar('D', PG)) return;
+    delay(200); if (tentarGirarEBuscar('E', PG)) return;
   } else {
-    if (tentarGirarEBuscar('D', 1000)) return;
-    delay(200); if (tentarGirarEBuscar('E', 1000)) return;
-    delay(200); if (tentarGirarEBuscar('E', 1000)) return;
-    delay(200); if (tentarGirarEBuscar('D', 1000)) return;
+    if (tentarGirarEBuscar('D', PG)) return;
+    delay(200); if (tentarGirarEBuscar('E', PG)) return;
+    delay(200); if (tentarGirarEBuscar('E', PG)) return;
+    delay(200); if (tentarGirarEBuscar('D', PG)) return;
   }
   mEsq.stop(); mDir.stop();
-
 }
 
-// ================================================================
-// LÓGICA DE DESVIO (EXECUTADA NO NÚCLEO 1)
-// ================================================================
 void executarDesvioVerde(int lado) {
   uint16_t r, g, b, c;
   int canalSensor = (lado == 1) ? 0 : 1;
   int canalOposto = (lado == 1) ? 1 : 0;
-  int limiarC = (lado == 1) ? 300 : 200;
+  int limiarC = 240;
 
-  Serial.println("--- Iniciando Fase 1: Avanco Lento ---");
-  
-  // 1. Avança devagar por 30 pulsos ou até detectar preto no sensor de cor atual
-  mEsq.move(30, velLenta);
-  mDir.move(30, velLenta);
-
+  bool duploVerde = false;
+  mEsq.move(100, velLenta);
+  mDir.move(100, velLenta);
+  bool detectouPreto = false;
   while (mEsq.isMoving() || mDir.isMoving()) {
     mEsq.update(); mDir.update();
-
-    tcaSelect(canalSensor);
+    tcaSelect(canalOposto); delay(t);
     tcs.getRawData(&r, &g, &b, &c);
-
-    if (c < limiarC) {
-      Serial.printf("Preto detectado (C=%d). Parando avanco.\n", c);
-      break;
+    if (ehVerde(r, g, b, c)){
+      tcaSelect(canalOposto); delay(t); tcs.getRawData(&r, &g, &b, &c);
+      if (ehVerde(r, g, b, c)) duploVerde = true;
     }
+    tcaSelect(canalSensor); delay(t); tcs.getRawData(&r, &g, &b, &c);
+    if (c < limiarC) { detectouPreto = true; break; }
   }
-  mEsq.stop(); mDir.stop();
-  delay(50);
-
-  Serial.println("--- Fase 2: Analise do Oposto e Giro ---");
   
-  // 2. Lê o sensor oposto para checar Duplo Verde
-  bool duploVerde = false;
-  tcaSelect(canalOposto);
-  delay(t);
+  mEsq.stop(); mDir.stop(); delay(50);
+  tcaSelect(canalOposto); delay(t);
   tcs.getRawData(&r, &g, &b, &c);
-
-  if (canalOposto == 0 && ehVerde(r, g, b, c)) duploVerde = true;
-  else if (canalOposto == 1 && ehVerde(r, g, b, c)) duploVerde = true;
-
-  // 3. Zera as variáveis de decisão, como pedido
+  if (ehVerde(r, g, b, c)){
+    tcaSelect(canalOposto); delay(t); tcs.getRawData(&r, &g, &b, &c);
+    if (ehVerde(r, g, b, c)) duploVerde = true;
+  } 
+  if (!detectouPreto) { n1 = 0; n2 = 0; comandoVerde = 0; return; }
 
   if (duploVerde) {
-    Serial.println("Verde detectado no lado OPOSTO (Duplo Verde)! Iniciando meia volta...");
-    // frente
-    mEsq.move(100, velBusca); mDir.move(100, velBusca);
+    rgbEsq(0, 255, 0); rgbDir(0, 255, 0); 
+    mEsq.move(100, velBusca);
+    mDir.move(100, velBusca);
     while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-    // Meia volta de 1000 pulsos inicial (Girando para a direita como padrão)
-    mEsq.move(1200, velBusca); mDir.move(-1200, velBusca);
+    rgbEsq(0, 0, 0); rgbDir(0, 0, 0);
+    mEsq.move(1600, velBusca + TErro); mDir.move(-1600, velBusca);
     while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-    //ré
-    mEsq.move(-200, velBusca); mDir.move(-200, velBusca);
-    while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-    // Continua girando até detectar linha ou até o limite de 2000 pulsos
+
+    for (int i = 0; i < 2; i++){
+      mEsq.move(1500, velBusca); mDir.move(-1500, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update();
+        atualizarSensores();
+        verificarPrata();
+        int ativos = 0;
+        for (int i = 3; i < 5; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA) break;
+      }
+    }
     mEsq.move(1500, velBusca); mDir.move(-1500, velBusca);
     while (mEsq.isMoving() || mDir.isMoving()) {
       mEsq.update(); mDir.update();
       atualizarSensores();
+      verificarPrata();
       int ativos = 0;
-      for (int i = 0; i < 6; i++) if (sensorValues[i] >= limiar) ativos++;
-      
-      if (ativos >= N_LINHA) {
-        Serial.println("Linha detectada após duplo verde!");
-        break;
+      for (int i = 3; i < 5; i++) if (sensorValues[i] >= limiarD) ativos++;
+      if (ativos >= N_LINHA) break;
+    }
+
+  } else {
+    mEsq.move(-300, 130); mDir.move(-300, 130);
+    while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+    
+    if (lado == 1) { 
+      rgbEsq(0, 255, 0);
+      rgbDir(0, 0, 0); ladoPrioridade = 'D';
+      mEsq.move(-400, velBusca); mDir.move(400, velBusca + TErro1);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+      mEsq.move(50, velBusca); mDir.move(50, velBusca + TErro1);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+      rgbEsq(0, 0, 0); rgbDir(0, 0, 0); 
+      mEsq.move(500, velBusca); mDir.move(500, velBusca + TErro1);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+        int ativos = 0;
+        for (int i = 0; i < 2; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA) break;
       }
+      mEsq.move(250, 130); mDir.move(250, 130);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+      mEsq.move(-700, velBusca); mDir.move(700, velBusca + TErro1);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+        int ativos = 0;
+        for (int i = 6; i < 8; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA) break;
+      }
+    } else { 
+      rgbEsq(0, 0, 0); rgbDir(0, 255, 0);
+      ladoPrioridade = 'E';
+      mEsq.move(400, velBusca + TErro2); mDir.move(-400, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+      mEsq.move(50, velBusca + TErro2); mDir.move(50, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+      rgbEsq(0, 0, 0); rgbDir(0, 0, 0); 
+      mEsq.move(500, velBusca + TErro2); mDir.move(500, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+        int ativos = 0;
+        for (int i = 6; i < 8; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA) break;
+      }
+      mEsq.move(250, 130); mDir.move(250, 130);
+      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+      mEsq.move(700, velBusca + TErro2); mDir.move(-700, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update(); atualizarSensores(); verificarPrata();
+        int ativos = 0;
+        for (int i = 0; i < 2; i++) if (sensorValues[i] >= limiarD) ativos++;
+        if (ativos >= N_LINHA) break;
+      }
+    }
+    mEsq.move(-100, velBusca); mDir.move(-100, velBusca);
+    while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+  }
+  mEsq.stop(); mDir.stop(); delay(10);
+  n1 = 0; n2 = 0; comandoVerde = 0;
+}
+
+// ================================================================
+// SETUP PRINCIPAL
+// ================================================================
+void setup() {
+  delay(500);
+  led1.begin(); led1.setBrightness(30);
+
+  serial_init();
+  delay(100);
+  SET_Eight_Mode(0, 1, 0); 
+
+  mEsq.begin(isrEsq); mDir.begin(isrDir);
+  pinMode(TRIG_1, OUTPUT);
+  pinMode(ECHO_1, INPUT);
+  pinMode(TRIG_2, OUTPUT);
+  pinMode(ECHO_2, INPUT);
+  xTaskCreatePinnedToCore(TaskContadorVerde, "TaskVerde", 4096, NULL, 1, NULL, 0);
+
+  rgbEsq(0,0,0);
+  rgbDir(0,0,0);
+}
+
+// ================================================================
+// LOOP PRINCIPAL
+// ================================================================
+void loop() {
+  float distFrontal = lerDistancia(TRIG_1, ECHO_1);
+      if (vermelho == true) {
+        controleM(0, 0);
+        mEsq.stop();
+        mDir.stop();
+        rgbEsq(255, 0, 0);
+        rgbDir(255, 0, 0);
+        Serial.println("Vermelho detectado na intersecao! Parando robo...");
+        while (1) {
+          delay(100);
+        }
+      }else if (distFrontal > 0 && distFrontal < d1) { 
+    leiturasObstaculo++;
+    if (leiturasObstaculo <= nL && distFrontal < d2 - 1){
+      mEsq.move(-150, velBusca);
+      mDir.move(-150, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update();
+        mDir.update();
+      }
+    }
+    if (leiturasObstaculo >= nL && distFrontal < d2) { 
+      leiturasObstaculo = 0;
+      desvioObstaculo();
     }
   } else {
-    Serial.println("Apenas um verde. Giro de 90 graus.");
-   mEsq.move(350, 130);
-   mDir.move(350, 130);
-  
-   // Enquanto os motores não atingirem o alvo, atualiza a contagem
-   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-    // Gira de 1000 pulsos para o lado detectado originalmente
-    if (lado == 1) { // Esquerda
-      mEsq.move(-1100, velBusca); mDir.move(1100, velBusca);
-      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-      //até achar a linha
-      mEsq.move(1500, velBusca); mDir.move(-1500, velBusca);
-      while (mEsq.isMoving() || mDir.isMoving()) {
-      mEsq.update(); mDir.update();
-      atualizarSensores();
-      int ativos = 0;
-      for (int i = 0; i < 6; i++) if (sensorValues[i] >= limiar) ativos++;
-      
-      if (ativos >= N_LINHA) {
-        Serial.println("Linha detectada após duplo verde!");
-        break;
-      }
-    }
-    } else { // Direita
-      mEsq.move(1100, velBusca); mDir.move(-1100, velBusca);
-      while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-      //até achar a linha
-      mEsq.move(-1500, velBusca); mDir.move(1500, velBusca);
-      while (mEsq.isMoving() || mDir.isMoving()) {
-      mEsq.update(); mDir.update();
-      atualizarSensores();
-      int ativos = 0;
-      for (int i = 0; i < 6; i++) if (sensorValues[i] >= limiar) ativos++;
-      
-      if (ativos >= N_LINHA) {
-        Serial.println("Linha detectada após duplo verde!");
-        break;
-      }
-    }
-    }
-
-
-
+    leiturasObstaculo = 0;
   }
 
-  mEsq.stop(); mDir.stop();
-  delay(10);
-  n1 = 0;
-  n2 = 0;
-  comandoVerde = 0;
-
-}
-
-void setup() {
-  Serial.begin(115200);
-  mEsq.begin(isrEsq); mDir.begin(isrDir);
-  for (int i = 0; i < 6; i++) pinMode(sensorPins[i], INPUT);
-  xTaskCreatePinnedToCore(TaskContadorVerde, "TaskVerde", 4096, NULL, 1, NULL, 0);
-}
-
-void loop() {
   if (comandoVerde != 0) {
     executarDesvioVerde(comandoVerde);
   }
 
-  // Segue linha
   atualizarSensores();
-  int totalAtivos = 0;
-  for (int i = 0; i < 6; i++) if (sensorValues[i] >= limiar) totalAtivos++;
+  verificarPrata(); // Checagem executada a cada leitura
+  
+  int todosAtivos = 0;
+  for (int i = 0; i < 8; i++) {
+    if (sensorValues[i] >= limiarD) todosAtivos++;
+  }
 
-  if (totalAtivos == 0) {
-    encontrarLinha();
-  } else {
-    executarSegueLinha();
+  if (todosAtivos >= 6) {
+    controleM(velLenta, velLenta);
+    rgbEsq(255,255,255); rgbDir(255,255,255);
+
+    bool verdeS1 = false;
+    bool verdeS2 = false;
+    bool linhaS1 = false;
+    bool linhaS2 = false;
+    while (1) {
+      uint16_t r1, g1, b1, c1;
+      uint16_t r2, g2, b2, c2;
+      
+      tcaSelect(esq); delay(t);
+      tcs.getRawData(&r1, &g1, &b1, &c1);
+      
+      tcaSelect(dir); delay(t);
+      tcs.getRawData(&r2, &g2, &b2, &c2);
+
+      // --- CHECAGEM DE VERMELHO (Parada em Interseção) ---
+      
+      if (ehVerde(r1, g1, b1, c1) || comandoVerde == 1) verdeS1 = true;
+      if (ehVerde(r2, g2, b2, c2) || comandoVerde == 2) verdeS2 = true;
+      
+      if (c1 < lP) linhaS1 = true;
+      if (c2 < lP) linhaS2 = true;
+      
+      if (verdeS1 && verdeS2) {
+        break;
+      }
+      
+      if (verdeS1 || verdeS2 || linhaS1 || linhaS2) {
+        delay(20);
+        tcaSelect(esq); delay(t); tcs.getRawData(&r1, &g1, &b1, &c1);
+        tcaSelect(dir); delay(t); tcs.getRawData(&r2, &g2, &b2, &c2);
+
+        if (ehVerde(r1, g1, b1, c1) || comandoVerde == 1) verdeS1 = true;
+        if (ehVerde(r2, g2, b2, c2) || comandoVerde == 2) verdeS2 = true;
+        if (c1 < lP) linhaS1 = true;
+        if (c2 < lP) linhaS2 = true;
+        break;
+      }
+
+      controleM(velLenta, velLenta);
+    }
+
+    if (verdeS1 && verdeS2) {
+      comandoVerde = 1;
+      tentativas = 0;
+    }
+    else if (((verdeS1 != verdeS2) || (!verdeS1 && !verdeS2 && linhaS1 && linhaS2)) && tentativas <= nT) {
+      mEsq.move(-250, velBusca);
+      mDir.move(-250, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update();
+        mDir.update();
+      }
+      n1 = 0; n2 = 0; comandoVerde = 0;
+      mEsq.stop();
+      mDir.stop();
+      controleM(0, 0);
+      tentativas++;
+    }
+    else if ((verdeS1 != verdeS2) && tentativas >= nT) {
+      comandoVerde = verdeS1 ? 1 : 2;
+      tentativas = 0;
+    }
+    else if (!verdeS1 && !verdeS2 && linhaS1 && linhaS2 && tentativas >= nT) {
+      mEsq.move(250, velBusca);
+      mDir.move(250, velBusca);
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update();
+        mDir.update();
+      }
+      n1 = 0; n2 = 0; comandoVerde = 0;
+      mEsq.stop();
+      mDir.stop();
+      controleM(0, 0);
+      tentativas = 0;
+    }
+  }
+  else {
+    int totalAtivos = 0;
+    for (int i = 3; i < 6; i++) if (sensorValues[i] >= limiar) totalAtivos++;
+    if (totalAtivos == 0) {
+      mEsq.move(Va, velLenta);
+      mDir.move(Va, velLenta);
+      bool encontrouAlgo = false;
+      while (mEsq.isMoving() || mDir.isMoving()) {
+        mEsq.update(); mDir.update();
+        if (comandoVerde != 0) { encontrouAlgo = true; break; }
+        atualizarSensores();
+        verificarPrata();
+        int ativos = 0;
+        for (int i = 3; i < 6; i++) if (sensorValues[i] >= limiar) ativos++;
+        if (ativos > 0) { encontrouAlgo = true; break; }
+      }
+      mEsq.stop();
+      mDir.stop();
+      if (!encontrouAlgo) { encontrarLinha(); }
+    } else {
+      executarSegueLinha();
+    }
   }
 }
