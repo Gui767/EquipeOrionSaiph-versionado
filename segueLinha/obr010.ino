@@ -28,6 +28,8 @@ const int TRIG_1 = 12;
 const int ECHO_1 = 11;
 const int TRIG_2 = 21;
 const int ECHO_2 = 47;
+const int TRIG_3 = 13;
+const int ECHO_3 = 14;
 
 // Pino e número de LEDs RGB
 #define PIN_LED_1 2
@@ -56,7 +58,7 @@ Adafruit_NeoPixel led1(NUMPIXELS, PIN_LED_1, NEO_GRB + NEO_KHZ800);
 // =================================================================
 int sensorValues[8];
 const int limiar     = 800;
-const int limiarD    = 1400;   // Limiar para desvio / refletância forte
+const int limiarD    = 1800;   // Limiar para desvio / refletância forte
 
 
 int dir = 1;
@@ -70,15 +72,15 @@ int t2 = 3;
 int nv = 2;
 int TErro = 0, TErro1 = 0, TErro2 = 0;
 int Va = 300;
-int lP = 200;           // Limiar de preto para o sensor de cor
+int lP = 190;           // Limiar de preto para o sensor de cor
 int nT = 2;
 int d1 = 10, d2 = 5, d3 = 15;
 int tentativas = 1;
 const int nL = 30;      // Leituras consecutivas para obstáculo
 int nL2 = 5;
 int leiturasObstaculo = 0;
-int av = 0, av1 = 320, av2 = 800;
-int PG = 1150;          // Pulso de giro
+int av = 0, av1 = 430, av2 = 800;
+int PG = 1130;          // Pulso de giro
 int velMedia = 200;
 int velBusca = 250;
 int velLenta = 100;
@@ -86,7 +88,7 @@ int velLenta = 100;
 // Controle de cor
 volatile int n1 = 0, n2 = 0, comandoVerde = 0;
 int reta = 0, nR = 10, e = 0, nE = 50;
-char ladoPrioridade = 'E';
+char ladoPrioridade = 'F';
 bool achou = true;
 volatile bool vermelho = false;   // true = vermelho detectado -> parada absoluta (igual ao 046 original)
 
@@ -110,6 +112,9 @@ const int velManobra = 255;
 const int velBase    = 255;
 const unsigned long PERIODO_LOOP_MS = 20;
 unsigned long ultimoLoopServos = 0;
+
+
+int direction = 1;
 
 // =================================================================
 //  MÁQUINA DE ESTADOS
@@ -249,7 +254,9 @@ bool detectarPrata() {
 
 // -------------------- Alinhamentos (versão sem verificarPrata) --------------------
 void alinhamento() {
+  unsigned long tempoAnterior = millis();
   while (1) {
+    if((millis() - tempoAnterior) >= 10000) break;
     atualizarSensores();
     int todosAtivos = 0;
     for (int i = 0; i < 8; i++) {
@@ -440,12 +447,12 @@ void executarSegueLinhaInterno() {
     controleM(velAlinhamentoEsq, velAlinhamentoDir);
   } else if (pesoEsq > pesoDir) {
     int diff = pesoEsq - pesoDir;
-    if (diff < 3)      controleM(-130, 255);
+    if (diff < 3)      controleM(130, 255);
     else if (diff < 5) controleM(-130, 130);
     else               controleM(-255, 255);
   } else {
     int diff = pesoDir - pesoEsq;
-    if (diff < 3)      controleM(255, -130);
+    if (diff < 3)      controleM(255, 130);
     else if (diff < 5) controleM(200, -200);
     else               controleM(255, -255);
   }
@@ -455,8 +462,8 @@ void executarSegueLinhaInterno() {
 void inicializarServos() {
   rgbDir(0,0,255);   rgbEsq(0,0,255);
 
-  mEsq.move(1000, velBusca);
-  mDir.move(1000, velBusca);
+  mEsq.move(1150, velBusca);
+  mDir.move(1150, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
   Terminou = false;
   distLateralAnterior = -1;
@@ -482,15 +489,19 @@ void inicializarServos() {
   pararMotores();
   delay(100);
   alinhamentoFC();
-  mEsq.move(300, velBusca);
-  mDir.move(300, velBusca);
+  mEsq.move(1000, velBusca);
+  mDir.move(1000, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
+  delay(200);
+  alinhamentoF();
+
+  /*
   mEsq.move((-PG + 150)*dir, velBusca);
   mDir.move(( PG + 150)*dir, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
 
   Serial.print("Lado monitorado: ");
-  Serial.println(ladoSeguido == LADO_ESQUERDA ? "ESQUERDA" : "DIREITA");
+  Serial.println(ladoSeguido == LADO_ESQUERDA ? "ESQUERDA" : "DIREITA");*/
   ultimoLoopServos = millis();
 }
 
@@ -630,14 +641,14 @@ void rgbDir(uint8_t r, uint8_t g, uint8_t b) {
 
 // -------------------- Cor --------------------
 bool ehVerde(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
-  if (c < 100) return false;
+  if (c < 105) return false;
   float Lcor = (r + g + b);
-  return (g > Lcor * 0.39 && r < Lcor * 0.33 && b < Lcor * 0.27);
+  return (g > Lcor * 0.38 && r < Lcor * 0.33 && b < Lcor * 0.28);
 }
 bool ehVrmlh(uint16_t r, uint16_t g, uint16_t b, uint16_t c) {
   if (c < 80) return false;
   float Lcor = (r + g + b);
-  return (g < Lcor * 0.40 && r > Lcor * 0.45);
+  return (g < Lcor * 0.37 && r > Lcor * 0.48);
 }
 
 // Leitura de cor protegida por mutex: seleciona o canal do TCA9548A e lê
@@ -753,6 +764,8 @@ void setup() {
   pinMode(ECHO_1, INPUT);
   pinMode(TRIG_2, OUTPUT);
   pinMode(ECHO_2, INPUT);
+  pinMode(TRIG_3, OUTPUT);
+  pinMode(ECHO_3, INPUT);
 
   pinMode(fimC1, INPUT_PULLUP);
   pinMode(fimC2, INPUT_PULLUP);
@@ -825,8 +838,8 @@ void loop() {
 
 void encontrarLinha() {
   if (ladoPrioridade == 'F') {
-    mEsq.move(80, 130);
-    mDir.move(80, 130);
+    mEsq.move(130, 130);
+    mDir.move(130, 130);
     while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
     mEsq.move(600, velBusca);
     mDir.move(600, velBusca);
@@ -836,12 +849,12 @@ void encontrarLinha() {
       atualizarSensores();
       if (detectarPrata()) { pararMotores(); return; } // interrompe se prata
       int ativos = 0;
-      for (int i = 2; i < 6; i++) if (sensorValues[i] >= limiarD) ativos++;
+      for (int i = 3; i < 5; i++) if (sensorValues[i] >= limiarD) ativos++;
       if (ativos >= N_LINHA) {
         delay(t);
         atualizarSensores();
         ativos = 0;
-        for (int i = 2; i < 6; i++) if (sensorValues[i] >= limiarD) ativos++;
+        for (int i = 3; i < 5; i++) if (sensorValues[i] >= limiarD) ativos++;
         if (ativos >= N_LINHA) { achou = true; break; }
       }
     }
@@ -1055,12 +1068,12 @@ void executarDesvioVerde(int lado) {
 void desvioObstaculo() {
   if(vermelho) {pararMotores(); while(1) delay(1000);}
   else{
-  rgbEsq(255,0,0); rgbDir(255,0,0);
+  rgbEsq(255,0,255); rgbDir(255,0,255);
   pararMotores();
   delay(300);
   rgbEsq(0,0,0); rgbDir(0,0,0);
   Serial.println("Obstaculo detectado! Girando para a esquerda...");
-  mEsq.move(-PG, velBusca); mDir.move(PG, velBusca);
+  mEsq.move(-PG *direction, velBusca); mDir.move(PG *direction, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
   mEsq.move(-150, velBusca); mDir.move(-150, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
@@ -1072,9 +1085,9 @@ void desvioObstaculo() {
   alinhamento();
   mEsq.move(350, velBusca); mDir.move(350, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-  mEsq.move(-PG, velBusca); mDir.move(PG, velBusca);
+  mEsq.move(-PG *direction, velBusca); mDir.move(PG *direction, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-  mEsq.move(-PG, velBusca); mDir.move(PG, velBusca);
+  mEsq.move(-PG *direction, velBusca); mDir.move(PG *direction, velBusca);
   while (mEsq.isMoving() || mDir.isMoving()) {
     mEsq.update(); mDir.update();
     atualizarSensores();
@@ -1106,7 +1119,9 @@ void desvio() {
     int leituras = 0;
     controleM(velMedia, velMedia);
     while (leituras < nL2) {
-      float dist = lerDistancia(TRIG_2, ECHO_2);
+        float dist;
+
+      if (direction == 1){dist = lerDistancia(TRIG_2, ECHO_2);} else {dist = lerDistancia(TRIG_3, ECHO_3);}
       if (dist > 0 && dist <= d3) leituras++;
       else leituras = 0;
       delay(15);
@@ -1114,14 +1129,16 @@ void desvio() {
     leituras = 0;
     controleM(velMedia, velMedia);
     while (leituras < nL2) {
-      float dist = lerDistancia(TRIG_2, ECHO_2);
+        float dist;
+
+      if (direction == 1){ dist = lerDistancia(TRIG_2, ECHO_2);} else {dist = lerDistancia(TRIG_3, ECHO_3);}
       if (dist > d3 || dist < 0) leituras++;
       else leituras = 0;
       delay(15);
     }
     mEsq.move(av, velMedia); mDir.move(av, velMedia);
     while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
-    mEsq.move(PG, velBusca); mDir.move(-PG, velBusca);
+    mEsq.move(PG*direction, velBusca); mDir.move(-PG*direction, velBusca);
     while (mEsq.isMoving() || mDir.isMoving()) { mEsq.update(); mDir.update(); }
     av = av2;
   }
